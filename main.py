@@ -48,10 +48,26 @@ last_axes = (0, 0, 0)
 keep_reference = False
 manual_yaw_override = None
 
-def normalize(value, center, range_span=90):
-    min_input = center - range_span
-    max_input = center + range_span
-    scaled = int((value - min_input) / (max_input - min_input) * 0x8000)
+def normalize(value, center, range_span=180):
+    diff = value - center
+    
+    # 1. Handle circular difference (the 'short way' around)
+    if diff > 180:
+        diff -= 360
+    elif diff < -180:
+        diff += 360
+    
+    # 2. Hard Clamp: Stop the movement at the edge of the span
+    # This prevents the 'jump' because even if the sensor values wrap,
+    # the output is locked to -range_span or +range_span.
+    if diff > range_span:
+        diff = range_span
+    elif diff < -range_span:
+        diff = -range_span
+        
+    # 3. Map to vJoy range (0 to 32768)
+    scaled = int(((diff + range_span) / (2 * range_span)) * 0x8000)
+    
     return max(0, min(scaled, 0x8000))
 
 print(f"[INFO] UDP server listening on {UDP_IP}:{UDP_PORT}")
