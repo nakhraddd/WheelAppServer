@@ -48,25 +48,67 @@ last_axes = (0, 0, 0)
 keep_reference = False
 manual_yaw_override = None
 
-def normalize(value, center, range_span=180):
+def normalize(value, center, range_span):
     diff = value - center
     
-    # 1. Handle circular difference (the 'short way' around)
-    if diff > 180:
-        diff -= 360
-    elif diff < -180:
-        diff += 360
+    # Handle the circular 180/-180 wrap-around
+    if diff > 180: diff -= 360
+    if diff < -180: diff += 360
     
-    # 2. Hard Clamp: Stop the movement at the edge of the span
-    # This prevents the 'jump' because even if the sensor values wrap,
-    # the output is locked to -range_span or +range_span.
+    # Sticky Clamp: Lock the wheel at the limit
     if diff > range_span:
         diff = range_span
     elif diff < -range_span:
         diff = -range_span
         
-    # 3. Map to vJoy range (0 to 32768)
+    # Map to vJoy range (0 to 0x8000)
     scaled = int(((diff + range_span) / (2 * range_span)) * 0x8000)
+    return max(0, min(scaled, 0x8000))
+
+total_steering = 0.0
+last_raw_pitch = None
+current_range_span = 180 # 180 for F1, 450 for ACC
+
+def update_steering(current_pitch, center, range_span):
+    global last_raw_pitch, total_steering
+    
+    # 1. Initialize on the first frame
+    if last_raw_pitch is None:
+        # We start at 0 relative to our current 'center'
+        total_steering = 0.0 
+        last_raw_pitch = current_pitch
+        return 0x4000 # Return exact vJoy center (16384)
+
+    # 2. Calculate the change (delta)
+    delta = current_pitch - last_raw_pitch
+    
+    # 3. Handle the 180/-180 wrap-around jump
+    if delta > 180:
+        delta -= 360
+    elif delta < -180:
+        delta += 360
+    
+    # 4. Deadzone for sensor jitter (prevents slow drift)
+    if abs(delta) < 0.05:
+        delta = 0
+    
+    # 5. Accumulate the change
+    total_steering += delta
+    last_raw_pitch = current_pitch
+
+    # 6. Center Correction: 
+    # This ensures that 'total_steering' stays relative to the 'center' 
+    # position captured when you hit the reset button.
+    # Note: We calculate the 'diff' from center to clamp properly.
+    actual_relative_steering = total_steering - (center - center) # Logic placeholder
+    
+    # Since we want it to work like 'normalize', we use total_steering 
+    # but clamp it within the range_span
+    total_steering = max(-range_span, min(total_steering, range_span))
+    
+    # 7. Map to vJoy range (0 to 32768)
+    # total_steering is already relative to 0 (the center)
+    scaled = int(((total_steering + range_span) / (2 * range_span)) * 0x8000)
     
     return max(0, min(scaled, 0x8000))
 
@@ -99,7 +141,17 @@ while True:
                 j.data.lButtons = sum(1 << (i - 1) for i, v in button_states.items() if v)
                 action = "pressed" if state else "released"
                 print(f"[INPUT] Button '{btn}' {action}")
-
+    
+    if msg == "mode:acc":
+            current_range_span = 400
+            total_steering = 0.0
+            print("[INFO] Switched to ACC Mode (900 degrees)")
+        
+    elif msg == "mode:f1":
+        current_range_span = 180
+        total_steering = 0.0
+        print("[INFO] Switched to F1 Mode (360 degrees)")
+        
     elif msg.startswith("throttle:"):
         val = int(msg.split(":")[1])
         j.data.wAxisXRot = int(val / 100 * 0x8000)
@@ -107,11 +159,8 @@ while True:
 
     elif msg == "lr":
         ref_roll = ref_pitch = ref_yaw = None
+        total_steering = 0.0
         print("[INFO] Reference reset requested")
-
-    elif msg == "kr":
-        keep_reference = not keep_reference
-        print(f"[INFO] Keep Reference toggled to: {keep_reference}")
 
     elif msg.startswith("manual_yaw:"):
         val = int(msg.split(":")[1])
@@ -133,8 +182,8 @@ while True:
             else:
                 last_axes = (ref_roll, ref_pitch)
 
-            j.data.wAxisX = normalize(last_axes[0], ref_roll)
-            j.data.wAxisY = normalize(last_axes[1], ref_pitch)
+            j.data.wAxisX = normalize(roll, ref_roll, 90)
+            j.data.wAxisY = update_steering(pitch, 0, current_range_span)
             j.update()
 
         except ValueError:
